@@ -6,6 +6,8 @@ from typing import Any, Optional
 import folder_paths  # type: ignore  — provided by ComfyUI runtime
 import torch
 from llama_cpp import Llama  # type: ignore
+from llama_cpp.llama_chat_format import (Llava15ChatHandler,  # type: ignore
+                                         Llava16ChatHandler)
 
 from .utils.media import (audio_to_data_uri, image_tensor_to_data_uri,
                           video_tensor_to_frame_list)
@@ -213,7 +215,14 @@ class GemmaGGUFAnalyzer:
     def _load_model(
         self, model_path: str, mmproj_path: str, n_gpu_layers: int, n_ctx: int
     ) -> None:
-        """Load the GGUF model and multimodal projector into memory."""
+        """Load the GGUF model and multimodal projector into memory.
+
+        Tries multiple strategies for loading the multimodal projector:
+        1. chat_handler via Llava16ChatHandler (newest llama-cpp-python)
+        2. chat_handler via Llava15ChatHandler (fallback)
+        3. clip_model_path parameter (legacy)
+        4. Text-only without projector (last resort)
+        """
         # Unload previous instance first
         if self.model_instance is not None:
             logger.info("Unloading previous model before reload")
@@ -223,13 +232,58 @@ class GemmaGGUFAnalyzer:
         logger.info("Loading model: %s", model_path)
         logger.info("Loading mmproj: %s", mmproj_path)
 
-        self.model_instance = Llama(
-            model_path=model_path,
-            clip_model_path=mmproj_path,
-            n_gpu_layers=n_gpu_layers,
-            n_ctx=n_ctx,
-            verbose=False,
-        )
+        # Strategy 1: Llava16ChatHandler (current recommended approach)
+        try:
+            chat_handler = Llava16ChatHandler(clip_model_path=mmproj_path, verbose=False)
+            self.model_instance = Llama(
+                model_path=model_path,
+                chat_handler=chat_handler,
+                n_gpu_layers=n_gpu_layers,
+                n_ctx=n_ctx,
+                verbose=False,
+            )
+            logger.info("Model loaded with Llava16ChatHandler")
+        except Exception as e1:
+            logger.warning("Llava16ChatHandler failed: %s — trying Llava15ChatHandler", e1)
+
+            # Strategy 2: Llava15ChatHandler (older approach)
+            try:
+                chat_handler = Llava15ChatHandler(clip_model_path=mmproj_path, verbose=False)
+                self.model_instance = Llama(
+                    model_path=model_path,
+                    chat_handler=chat_handler,
+                    n_gpu_layers=n_gpu_layers,
+                    n_ctx=n_ctx,
+                    verbose=False,
+                )
+                logger.info("Model loaded with Llava15ChatHandler")
+            except Exception as e2:
+                logger.warning("Llava15ChatHandler failed: %s — trying clip_model_path", e2)
+
+                # Strategy 3: clip_model_path parameter (legacy)
+                try:
+                    self.model_instance = Llama(
+                        model_path=model_path,
+                        clip_model_path=mmproj_path,
+                        n_gpu_layers=n_gpu_layers,
+                        n_ctx=n_ctx,
+                        verbose=False,
+                    )
+                    logger.info("Model loaded with clip_model_path parameter")
+                except Exception as e3:
+                    logger.warning("clip_model_path failed: %s — loading text-only", e3)
+
+                    # Strategy 4: Text-only (no multimodal)
+                    self.model_instance = Llama(
+                        model_path=model_path,
+                        n_gpu_layers=n_gpu_layers,
+                        n_ctx=n_ctx,
+                        verbose=False,
+                    )
+                    logger.warning(
+                        "Model loaded WITHOUT multimodal projector. "
+                        "Image/video/audio inputs will not work."
+                    )
 
         self.current_model_path = model_path
         self.current_mmproj_path = mmproj_path
