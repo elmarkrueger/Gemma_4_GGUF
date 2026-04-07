@@ -17,7 +17,13 @@ A ComfyUI custom node for multimodal analysis using **Gemma-4-E4B-it** (GGUF) vi
    pip install -r requirements.txt
    ```
 
-   > **Note:** `llama-cpp-python` must be compiled with GPU support for CUDA acceleration. See [llama-cpp-python installation](https://github.com/abetlen/llama-cpp-python#installation) for build instructions.
+   > **Important:** `llama-cpp-python` version **0.3.35** or later is **mandatory**. This is the first version that includes the `Gemma4ChatHandler` required by this node. Earlier versions will not work. Install the correct version with:
+   >
+   > ```bash
+   > pip install llama-cpp-python>=0.3.35
+   > ```
+   >
+   > `llama-cpp-python` must be compiled with GPU support for CUDA acceleration. See [llama-cpp-python installation](https://github.com/abetlen/llama-cpp-python#installation) for build instructions.
 
 3. Restart ComfyUI.
 
