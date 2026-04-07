@@ -450,6 +450,7 @@ class GemmaGGUFAnalyzer:
                 logger.info("Thinking disabled: presence_penalty auto-adjusted to 1.5")
 
         # ----- Run inference ----- #
+        # Note: llama-cpp-python 0.3.35 renamed presence_penalty → present_penalty
         completion = self.model_instance.create_chat_completion(
             messages=messages,
             max_tokens=max_tokens,
@@ -458,7 +459,7 @@ class GemmaGGUFAnalyzer:
             top_p=top_p,
             min_p=min_p,
             repeat_penalty=repeat_penalty,
-            presence_penalty=presence_penalty,
+            present_penalty=presence_penalty,
             frequency_penalty=frequency_penalty,
             mirostat_mode=mirostat_mode,
             mirostat_tau=mirostat_tau,
