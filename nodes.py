@@ -16,6 +16,78 @@ from .utils.memory import unload_llm
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Built-in system prompts (hardcoded from docs/)
+# ---------------------------------------------------------------------------
+
+PROMPT_REVERSE_ENGINEERED = """You are an expert image analysis and prompt engineering system. Your sole function is to analyze a provided image and output a single, highly detailed natural-language prompt that enables an image generation model to faithfully recreate the source image. Output only the prompt text — no preambles, labels, explanations, commentary, or formatting.
+
+Follow these instructions precisely:
+
+1. STYLE IDENTIFICATION (mandatory first priority)
+Determine the visual medium and rendering style of the image before anything else. Identify it accurately from categories including but not limited to: photograph, studio photograph, candid photograph, cinematic still, analog film photograph, 3D render, CGI rendering, digital painting, oil painting, acrylic painting, watercolor painting, gouache painting, ink drawing, pen-and-ink illustration, pencil sketch, charcoal drawing, pastel artwork, vector illustration, flat illustration, concept art, matte painting, pixel art, anime artwork, manga panel, comic book illustration, collage, mixed media, engraving, woodcut, linocut, stencil art, graffiti art, or any other identifiable style. If the style blends multiple techniques, describe the combination. The style must appear as the opening element of the prompt.
+
+2. MAIN SUBJECT
+Describe the primary subject with precision: what or who it is, physical appearance, clothing, expression, pose, material, texture, color, and any distinguishing features. For people, include apparent age range, ethnicity cues only when visually essential for recreation, hair, attire, and body language. For objects, include shape, material, surface quality, and condition. For animals or creatures, include species, coloring, posture, and expression.
+
+3. ACTION AND POSE
+Describe what the subject is doing, the direction of gaze, gesture, motion, or stillness. Capture the dynamic or static nature of the scene.
+
+4. COMPOSITION AND FRAMING
+Note the camera angle or viewpoint (close-up, medium shot, wide shot, bird's-eye, worm's-eye, three-quarter view, profile, etc.), depth of field, focal point, and how elements are arranged within the frame.
+
+5. BACKGROUND AND ENVIRONMENT
+Describe the setting, scenery, architectural elements, landscape, interior details, atmospheric conditions, weather, time of day, season, and any contextual objects or secondary elements.
+
+6. LIGHTING
+Describe the lighting setup: direction, quality (soft, harsh, diffused, dramatic), color temperature (warm, cool, neutral), light sources (natural sunlight, golden hour, overcast, studio lighting, neon, candlelight, rim light, backlight, volumetric light, chiaroscuro), shadows, highlights, and overall luminance.
+
+7. COLOR PALETTE AND MOOD
+Describe the dominant and accent colors, saturation level, contrast, tonal range, and the emotional mood or atmosphere conveyed (serene, ominous, joyful, melancholic, energetic, mysterious, etc.).
+
+8. ADDITIONAL DETAILS
+Include any remaining important visual elements: text appearing in the image (wrap exact text in quotation marks), logos, symbols, patterns, special effects (bokeh, lens flare, motion blur, grain, vignette, glitch), texture overlays, borders, or any other notable feature required for accurate recreation.
+
+9. OUTPUT RULES
+- Write the prompt as a single continuous block of natural-language text. Do not use bullet points, numbered lists, section headers, or any structural formatting.
+- Begin with the identified style, then weave all elements together in a coherent, descriptive flow.
+- Adjust prompt length to match image complexity: use approximately 120 words for simple compositions and up to 300 words for complex scenes. Never go below 120 or above 300 words.
+- Use quotation marks exclusively to denote text elements visible within the image.
+- Do not mention that you are analyzing an image, do not reference the source image, and do not include any meta-commentary.
+- Output only the prompt. Nothing else."""
+
+PROMPT_STYLE_TRANSFER = """You are an expert image analysis and prompt engineering system. Your sole function is to analyze two provided images\u2014an "Input Image" (for content) and a "Reference Image" (for style)\u2014and output a single, highly detailed natural-language prompt. This prompt must enable an image generation model to faithfully recreate the exact subjects and scenes of the Input Image, but rendered entirely in the style, lighting, and mood of the Reference Image. Output only the prompt text — no preambles, labels, explanations, commentary, or formatting. Follow these instructions precisely:
+
+**1. STYLE IDENTIFICATION (mandatory first priority)**
+Determine the visual medium and rendering style of the Reference Image before anything else. Identify it accurately from categories including but not limited to: photograph, studio photograph, cinematic still, 3D render, digital painting, oil painting, watercolor painting, ink drawing, concept art, anime artwork, mixed media, or any other identifiable style. If the style blends multiple techniques, describe the combination. The style must appear as the opening element of the prompt.
+
+**2. MAIN SUBJECT & ACTION (Input Image)**
+Describe the primary subject of the Input Image with precision: what or who it is, physical appearance, clothing, expression, and any distinguishing features. Describe what the subject is doing, the direction of gaze, gesture, motion, or stillness. Retain the exact content and actions of the Input Image, but describe its material, texture, or color through the lens of the Reference Image's style. 
+
+**3. COMPOSITION AND FRAMING (Input Image)**
+Note the camera angle or viewpoint, depth of field, focal point, and how elements are arranged within the frame of the Input Image. Capture the dynamic or static nature of the scene.
+
+**4. BACKGROUND AND ENVIRONMENT (Input Image)**
+Describe the setting, scenery, architectural elements, landscape, interior details, and any contextual objects or secondary elements present in the Input Image.
+
+**5. LIGHTING, COLOR PALETTE AND MOOD (Reference Image)**
+Analyze the Reference Image and describe the lighting setup: direction, quality (soft, harsh, diffused, dramatic), color temperature, light sources, shadows, highlights, and overall luminance. Extract the dominant and accent colors, saturation level, contrast, tonal range, and the emotional mood or atmosphere conveyed. Apply these lighting and color characteristics strictly to the environment and subjects of the Input Image.
+
+**6. OUTPUT RULES**
+* Write the prompt as a single continuous block of natural-language text.
+* Do not use bullet points, numbered lists, section headers, or any structural formatting.
+* Begin with the identified style from the Reference Image, then weave all elements together in a coherent, descriptive flow.
+* Adjust prompt length to match image complexity: use approximately 120 words for simple compositions and up to 300 words for complex scenes.
+* Never go below 120 or above 300 words.
+* Do not mention that you are analyzing an image, do not reference the Input or Reference images by name, and do not include any meta-commentary.
+* Output only the prompt.
+* Nothing else."""
+
+PRESET_PROMPTS = {
+    "Reverse Engineered Prompt": PROMPT_REVERSE_ENGINEERED,
+    "Style Transfer Prompt": PROMPT_STYLE_TRANSFER,
+}
+
+# ---------------------------------------------------------------------------
 # Helper: filter GGUF file lists for the dropdown menus
 # ---------------------------------------------------------------------------
 
@@ -77,11 +149,26 @@ class GemmaGGUFAnalyzer:
                     _get_mmproj_models(),
                     {"tooltip": "Multimodal projector file (mmproj-*.gguf) — must be in the same models/LLM folder as the model"},
                 ),
+                "use_custom_prompt": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": "When enabled, the custom system_prompt text is used. When disabled, the selected preset_prompt is used instead.",
+                    },
+                ),
+                "preset_prompt": (
+                    list(PRESET_PROMPTS.keys()),
+                    {
+                        "default": "Reverse Engineered Prompt",
+                        "tooltip": "Built-in system prompt preset. Only active when use_custom_prompt is disabled.",
+                    },
+                ),
                 "system_prompt": (
                     "STRING",
                     {
                         "multiline": True,
                         "default": "You are a helpful multimodal analyzer.",
+                        "tooltip": "Custom system prompt. Only active when use_custom_prompt is enabled.",
                     },
                 ),
                 "user_prompt": (
@@ -185,6 +272,7 @@ class GemmaGGUFAnalyzer:
             },
             "optional": {
                 "image": ("IMAGE",),
+                "reference_image": ("IMAGE", {"tooltip": "Reference image for style transfer. The model will distinguish this from the main input image."}),
                 "video": ("IMAGE",),   # batch of frames [F, H, W, 3]
                 "audio": ("AUDIO",),
             },
@@ -294,6 +382,8 @@ class GemmaGGUFAnalyzer:
         self,
         gguf_model: str,
         mmproj_model: str,
+        use_custom_prompt: bool,
+        preset_prompt: str,
         system_prompt: str,
         user_prompt: str,
         enable_thinking: bool,
@@ -315,6 +405,7 @@ class GemmaGGUFAnalyzer:
         n_ctx: int,
         video_fps: float,
         image: Optional[torch.Tensor] = None,
+        reference_image: Optional[torch.Tensor] = None,
         video: Optional[torch.Tensor] = None,
         audio: Optional[dict] = None,
     ) -> tuple[str]:
@@ -322,6 +413,8 @@ class GemmaGGUFAnalyzer:
             return self._run_inference(
                 gguf_model=gguf_model,
                 mmproj_model=mmproj_model,
+                use_custom_prompt=use_custom_prompt,
+                preset_prompt=preset_prompt,
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 enable_thinking=enable_thinking,
@@ -342,6 +435,7 @@ class GemmaGGUFAnalyzer:
                 n_ctx=n_ctx,
                 video_fps=video_fps,
                 image=image,
+                reference_image=reference_image,
                 video=video,
                 audio=audio,
             )
@@ -372,6 +466,8 @@ class GemmaGGUFAnalyzer:
         self,
         gguf_model: str,
         mmproj_model: str,
+        use_custom_prompt: bool,
+        preset_prompt: str,
         system_prompt: str,
         user_prompt: str,
         enable_thinking: bool,
@@ -392,6 +488,7 @@ class GemmaGGUFAnalyzer:
         n_ctx: int,
         video_fps: float,
         image: Optional[torch.Tensor] = None,
+        reference_image: Optional[torch.Tensor] = None,
         video: Optional[torch.Tensor] = None,
         audio: Optional[dict] = None,
     ) -> tuple[str]:
@@ -411,6 +508,19 @@ class GemmaGGUFAnalyzer:
                 "together in ComfyUI/models/LLM/"
             )
 
+        # ----- Resolve effective system prompt ----- #
+        if use_custom_prompt:
+            effective_system_prompt = system_prompt
+            logger.info("Using custom system prompt")
+        else:
+            effective_system_prompt = PRESET_PROMPTS.get(preset_prompt, system_prompt)
+            logger.info("Using preset system prompt: %s", preset_prompt)
+            if preset_prompt == "Style Transfer Prompt" and reference_image is None:
+                logger.warning(
+                    "Style Transfer Prompt selected but no reference_image connected. "
+                    "The style transfer prompt expects both an input image and a reference image."
+                )
+
         # ----- Load / cache model ----- #
         if self._needs_reload(model_path, mmproj_path, n_gpu_layers, n_ctx, enable_thinking):
             self._load_model(model_path, mmproj_path, n_gpu_layers, n_ctx, enable_thinking)
@@ -421,7 +531,14 @@ class GemmaGGUFAnalyzer:
         ]
 
         if image is not None:
+            if reference_image is not None:
+                # Label images so the model can distinguish them
+                user_content.append({"type": "text", "text": "Input Image:"})
             user_content.append(image_tensor_to_data_uri(image))
+
+        if reference_image is not None:
+            user_content.append({"type": "text", "text": "Reference Image:"})
+            user_content.append(image_tensor_to_data_uri(reference_image))
 
         if video is not None:
             user_content.extend(
@@ -434,7 +551,7 @@ class GemmaGGUFAnalyzer:
             user_content.append(audio_to_data_uri(audio))
 
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": effective_system_prompt},
             {"role": "user", "content": user_content},
         ]
 

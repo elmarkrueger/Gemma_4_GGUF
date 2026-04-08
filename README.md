@@ -1,6 +1,8 @@
 # ComfyUI-Gemma4-GGUF
 
-A ComfyUI custom node for multimodal analysis using **Gemma-4-E4B-it** (GGUF) via `llama-cpp-python`. Supports text, image, video (≤ 30 s), and audio (≤ 60 s) inputs.
+A ComfyUI custom node for multimodal analysis using **Gemma-4-E4B-it** (GGUF) via `llama-cpp-python`. Supports text, image, video (≤ 30 s). Includes built-in system prompt presets for **reverse-engineered image prompting** and **style transfer**, plus an optional reference image input for two-image workflows.
+
+![Node UI](images/node_img.jpg)
 
 ## Installation
 
@@ -52,7 +54,9 @@ Find the node in the **LLM** category in the ComfyUI node menu.
 |-----------|------|---------|-------------|
 | `gguf_model` | Dropdown | — | Select the GGUF model from `models/LLM/` |
 | `mmproj_model` | Dropdown | — | Select the multimodal projector from `models/LLM/` |
-| `system_prompt` | String | `"You are a helpful multimodal analyzer."` | System role definition |
+| `use_custom_prompt` | Boolean | `True` | Toggle between the custom `system_prompt` text field and the built-in `preset_prompt` dropdown. When **enabled**, your custom text is used; when **disabled**, the selected preset is used. |
+| `preset_prompt` | Dropdown | `"Reverse Engineered Prompt"` | Built-in system prompt preset. Only active when `use_custom_prompt` is **disabled**. Options: `Reverse Engineered Prompt`, `Style Transfer Prompt`. |
+| `system_prompt` | String | `"You are a helpful multimodal analyzer."` | Custom system role definition. Only active when `use_custom_prompt` is **enabled**. |
 | `user_prompt` | String | `"Analyze the provided input."` | User instruction |
 | `enable_thinking` | Boolean | `True` | Enable reasoning / thinking mode |
 | `strip_thinking_tags` | Boolean | `True` | Remove `<think>…</think>` from output |
@@ -77,7 +81,8 @@ Find the node in the **LLM** category in the ComfyUI node menu.
 
 | Input | Type | Description |
 |-------|------|-------------|
-| `image` | IMAGE | Single image or batch `[N, H, W, 3]` |
+| `image` | IMAGE | Single image or batch `[N, H, W, 3]` — serves as the **input image** (content source) |
+| `reference_image` | IMAGE | Reference image for **style transfer** workflows. When connected alongside `image`, both are labeled for the model to distinguish (`Input Image` vs `Reference Image`). |
 | `video` | IMAGE | Video as frame batch `[F, H, W, 3]` |
 | `audio` | AUDIO | Audio dict `{waveform, sample_rate}` |
 
@@ -92,6 +97,17 @@ Find the node in the **LLM** category in the ComfyUI node menu.
 When `enable_thinking` is **True**, the model performs internal reasoning before answering. This produces `<think>…</think>` blocks. Use `strip_thinking_tags` to control whether these appear in the output.
 
 When thinking is **disabled**, temperature is auto-adjusted to 0.7 and presence_penalty to 1.5 (if left at defaults) to prevent repetitive output.
+
+## System Prompt Presets
+
+The node ships with two built-in system prompt presets, selectable via the `preset_prompt` dropdown when `use_custom_prompt` is **disabled**:
+
+| Preset | Purpose |
+|--------|---------|
+| **Reverse Engineered Prompt** | Analyzes a single image and generates a detailed natural-language prompt (120–300 words) that enables an image generation model to faithfully recreate the source image. Covers style, subject, composition, lighting, color palette, and additional details. |
+| **Style Transfer Prompt** | Analyzes two images — an **input image** (content) and a **reference image** (style) — and generates a prompt that recreates the input image's subjects rendered in the reference image's visual style, lighting, and mood. Requires both `image` and `reference_image` to be connected. |
+
+The `use_custom_prompt` toggle acts as a safeguard: when **enabled**, the custom `system_prompt` text field is used and the presets are ignored; when **disabled**, the selected preset is used and the custom text field is ignored.
 
 ## Memory Management
 
