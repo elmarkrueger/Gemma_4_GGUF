@@ -5,18 +5,19 @@ from typing import Any, Optional
 
 import folder_paths  # type: ignore  — provided by ComfyUI runtime
 import torch
+from comfy_api.latest import io
 from llama_cpp import Llama  # type: ignore
 from llama_cpp.llama_chat_format import Gemma4ChatHandler  # type: ignore
 from llama_cpp.llama_chat_format import Llava16ChatHandler
 
-from .utils.media import (audio_to_data_uri, image_tensor_to_data_uri,
-                          video_tensor_to_frame_list)
-from .utils.memory import unload_llm
+from ..utils.media import (audio_to_data_uri, image_tensor_to_data_uri,
+                           video_tensor_to_frame_list)
+from ..utils.memory import unload_llm
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Built-in system prompts (hardcoded from docs/)
+# Built-in system prompts
 # ---------------------------------------------------------------------------
 
 PROMPT_REVERSE_ENGINEERED = """You are an expert image analysis and prompt engineering system. Your sole function is to analyze a provided image and output a single, highly detailed natural-language prompt that enables an image generation model to faithfully recreate the source image. Output only the prompt text — no preambles, labels, explanations, commentary, or formatting.
@@ -116,13 +117,14 @@ def _get_mmproj_models() -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Node class
+# Module-level model cache (replaces instance state for V3 stateless nodes)
 # ---------------------------------------------------------------------------
 
-class GemmaGGUFAnalyzer:
-    """ComfyUI node for multimodal analysis using Gemma-4-E4B-it via llama.cpp.
+class _ModelCache:
+    """Holds the loaded llama-cpp model between executions.
 
-    Supports text, image, video (≤30 s), and audio (≤60 s) inputs.
+    V3 nodes are stateless (@classmethod execute), so model caching
+    lives at module scope rather than on the node instance.
     """
 
     def __init__(self):
@@ -133,166 +135,10 @@ class GemmaGGUFAnalyzer:
         self.current_n_ctx: Optional[int] = None
         self.current_enable_thinking: Optional[bool] = None
 
-    # ------------------------------------------------------------------ #
-    # ComfyUI interface
-    # ------------------------------------------------------------------ #
-
-    @classmethod
-    def INPUT_TYPES(cls) -> dict[str, Any]:
-        return {
-            "required": {
-                "gguf_model": (
-                    _get_gguf_models(),
-                    {"tooltip": "GGUF model file from models/LLM (excludes mmproj files)"},
-                ),
-                "mmproj_model": (
-                    _get_mmproj_models(),
-                    {"tooltip": "Multimodal projector file (mmproj-*.gguf) — must be in the same models/LLM folder as the model"},
-                ),
-                "use_custom_prompt": (
-                    "BOOLEAN",
-                    {
-                        "default": True,
-                        "tooltip": "When enabled, the custom system_prompt text is used. When disabled, the selected preset_prompt is used instead.",
-                    },
-                ),
-                "preset_prompt": (
-                    list(PRESET_PROMPTS.keys()),
-                    {
-                        "default": "Reverse Engineered Prompt",
-                        "tooltip": "Built-in system prompt preset. Only active when use_custom_prompt is disabled.",
-                    },
-                ),
-                "system_prompt": (
-                    "STRING",
-                    {
-                        "multiline": True,
-                        "default": "You are a helpful multimodal analyzer.",
-                        "tooltip": "Custom system prompt. Only active when use_custom_prompt is enabled.",
-                    },
-                ),
-                "user_prompt": (
-                    "STRING",
-                    {
-                        "multiline": True,
-                        "default": "Analyze the provided input.",
-                    },
-                ),
-                "enable_thinking": (
-                    "BOOLEAN",
-                    {"default": True, "tooltip": "Enable model reasoning / thinking mode"},
-                ),
-                "strip_thinking_tags": (
-                    "BOOLEAN",
-                    {"default": True, "tooltip": "Remove <think>…</think> blocks from output"},
-                ),
-                "unload_model": (
-                    "BOOLEAN",
-                    {"default": False, "tooltip": "Aggressively free VRAM/RAM after inference"},
-                ),
-                # --- Inference parameters ---
-                "max_tokens": (
-                    "INT",
-                    {"default": 1024, "min": 1, "max": 128000, "step": 1},
-                ),
-                "temperature": (
-                    "FLOAT",
-                    {"default": 0.8, "min": 0.0, "max": 2.0, "step": 0.05},
-                ),
-                "top_k": (
-                    "INT",
-                    {"default": 40, "min": 0, "max": 500, "step": 1},
-                ),
-                "top_p": (
-                    "FLOAT",
-                    {"default": 0.95, "min": 0.0, "max": 1.0, "step": 0.01},
-                ),
-                "min_p": (
-                    "FLOAT",
-                    {"default": 0.05, "min": 0.0, "max": 1.0, "step": 0.01},
-                ),
-                "repeat_penalty": (
-                    "FLOAT",
-                    {"default": 1.1, "min": 0.0, "max": 3.0, "step": 0.05},
-                ),
-                "presence_penalty": (
-                    "FLOAT",
-                    {"default": 0.0, "min": -2.0, "max": 2.0, "step": 0.1},
-                ),
-                "frequency_penalty": (
-                    "FLOAT",
-                    {"default": 0.0, "min": -2.0, "max": 2.0, "step": 0.1},
-                ),
-                "mirostat_mode": (
-                    "INT",
-                    {"default": 0, "min": 0, "max": 2, "step": 1},
-                ),
-                "mirostat_tau": (
-                    "FLOAT",
-                    {"default": 5.0, "min": 0.0, "max": 20.0, "step": 0.1},
-                ),
-                "mirostat_eta": (
-                    "FLOAT",
-                    {"default": 0.1, "min": 0.0, "max": 1.0, "step": 0.01},
-                ),
-                "seed": (
-                    "INT",
-                    {"default": -1, "min": -1, "max": 0x7FFFFFFFFFFFFFFF},
-                ),
-                "n_gpu_layers": (
-                    "INT",
-                    {
-                        "default": -1,
-                        "min": -1,
-                        "max": 200,
-                        "step": 1,
-                        "tooltip": "-1 = offload all layers to GPU",
-                    },
-                ),
-                "n_ctx": (
-                    "INT",
-                    {
-                        "default": 8192,
-                        "min": 512,
-                        "max": 131072,
-                        "step": 512,
-                        "tooltip": "Context window size (Gemma-4 supports up to 128 K)",
-                    },
-                ),
-                "video_fps": (
-                    "FLOAT",
-                    {
-                        "default": 1.0,
-                        "min": 0.1,
-                        "max": 5.0,
-                        "step": 0.1,
-                        "tooltip": "Temporal sampling rate for video input (frames per second)",
-                    },
-                ),
-            },
-            "optional": {
-                "image": ("IMAGE",),
-                "reference_image": ("IMAGE", {"tooltip": "Reference image for style transfer. The model will distinguish this from the main input image."}),
-                "video": ("IMAGE",),   # batch of frames [F, H, W, 3]
-                "audio": ("AUDIO",),
-            },
-        }
-
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("analysis_text",)
-    FUNCTION = "analyze"
-    CATEGORY = "LLM"
-    OUTPUT_NODE = False
-
-    # ------------------------------------------------------------------ #
-    # Model lifecycle
-    # ------------------------------------------------------------------ #
-
-    def _needs_reload(
+    def needs_reload(
         self, model_path: str, mmproj_path: str, n_gpu_layers: int, n_ctx: int,
         enable_thinking: bool = True,
     ) -> bool:
-        """Check whether a new model load is required."""
         if self.model_instance is None:
             return True
         return (
@@ -303,18 +149,10 @@ class GemmaGGUFAnalyzer:
             or self.current_enable_thinking != enable_thinking
         )
 
-    def _load_model(
+    def load_model(
         self, model_path: str, mmproj_path: str, n_gpu_layers: int, n_ctx: int,
         enable_thinking: bool = True,
     ) -> None:
-        """Load the GGUF model and multimodal projector into memory.
-
-        Tries multiple strategies for loading the multimodal projector:
-        1. chat_handler via Gemma4ChatHandler (native Gemma 4 support)
-        2. chat_handler via Llava16ChatHandler (generic fallback)
-        3. Text-only without projector (last resort)
-        """
-        # Unload previous instance first
         if self.model_instance is not None:
             logger.info("Unloading previous model before reload")
             unload_llm(self.model_instance)
@@ -323,7 +161,7 @@ class GemmaGGUFAnalyzer:
         logger.info("Loading model: %s", model_path)
         logger.info("Loading mmproj: %s", mmproj_path)
 
-        # Strategy 1: Gemma4ChatHandler (native Gemma 4 support in llama-cpp-python ≥0.3.35)
+        # Strategy 1: Gemma4ChatHandler (native Gemma 4 support in llama-cpp-python >=0.3.35)
         try:
             chat_handler = Gemma4ChatHandler(
                 clip_model_path=mmproj_path,
@@ -374,12 +212,77 @@ class GemmaGGUFAnalyzer:
         self.current_enable_thinking = enable_thinking
         logger.info("Model loaded successfully (n_gpu_layers=%d, n_ctx=%d)", n_gpu_layers, n_ctx)
 
-    # ------------------------------------------------------------------ #
-    # Main execution
-    # ------------------------------------------------------------------ #
+    def unload(self) -> None:
+        if self.model_instance is not None:
+            unload_llm(self.model_instance)
+        self.model_instance = None
+        self.current_model_path = None
+        self.current_mmproj_path = None
+        self.current_n_gpu_layers = None
+        self.current_n_ctx = None
+        self.current_enable_thinking = None
 
-    def analyze(
-        self,
+
+_model_cache = _ModelCache()
+
+
+# ---------------------------------------------------------------------------
+# V3 Node
+# ---------------------------------------------------------------------------
+
+class DuffyGemmaGGUFAnalyzer(io.ComfyNode):
+    """Multimodal analysis using Gemma-4-E4B-it via llama.cpp.
+
+    Supports text, image, video, and audio inputs.
+    """
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="Duffy_GemmaGGUFAnalyzer",
+            display_name="Gemma-4 GGUF Multimodal Analyzer",
+            category="Duffy/LLM",
+            description="Multimodal analysis using Gemma-4-E4B-it via llama.cpp. Supports text, image, video, and audio inputs.",
+            inputs=[
+                io.Combo.Input("gguf_model", options=_get_gguf_models(), tooltip="GGUF model file from models/LLM (excludes mmproj files)"),
+                io.Combo.Input("mmproj_model", options=_get_mmproj_models(), tooltip="Multimodal projector file (mmproj-*.gguf)"),
+                io.Boolean.Input("use_custom_prompt", default=True, tooltip="When enabled, the custom system_prompt text is used. When disabled, the selected preset_prompt is used instead."),
+                io.Combo.Input("preset_prompt", options=list(PRESET_PROMPTS.keys()), default="Reverse Engineered Prompt", tooltip="Built-in system prompt preset. Only active when use_custom_prompt is disabled."),
+                io.String.Input("system_prompt", multiline=True, default="You are a helpful multimodal analyzer.", tooltip="Custom system prompt. Only active when use_custom_prompt is enabled."),
+                io.String.Input("user_prompt", multiline=True, default="Analyze the provided input."),
+                io.Boolean.Input("enable_thinking", default=True, tooltip="Enable model reasoning / thinking mode"),
+                io.Boolean.Input("strip_thinking_tags", default=True, tooltip="Remove <think>...</think> blocks from output"),
+                io.Boolean.Input("unload_model", default=False, tooltip="Aggressively free VRAM/RAM after inference"),
+                # --- Inference parameters ---
+                io.Int.Input("max_tokens", default=1024, min=1, max=128000, step=1),
+                io.Float.Input("temperature", default=0.8, min=0.0, max=2.0, step=0.05),
+                io.Int.Input("top_k", default=40, min=0, max=500, step=1),
+                io.Float.Input("top_p", default=0.95, min=0.0, max=1.0, step=0.01),
+                io.Float.Input("min_p", default=0.05, min=0.0, max=1.0, step=0.01),
+                io.Float.Input("repeat_penalty", default=1.1, min=0.0, max=3.0, step=0.05),
+                io.Float.Input("presence_penalty", default=0.0, min=-2.0, max=2.0, step=0.1),
+                io.Float.Input("frequency_penalty", default=0.0, min=-2.0, max=2.0, step=0.1),
+                io.Int.Input("mirostat_mode", default=0, min=0, max=2, step=1),
+                io.Float.Input("mirostat_tau", default=5.0, min=0.0, max=20.0, step=0.1),
+                io.Float.Input("mirostat_eta", default=0.1, min=0.0, max=1.0, step=0.01),
+                io.Int.Input("seed", default=-1, min=-1, max=0x7FFFFFFFFFFFFFFF),
+                io.Int.Input("n_gpu_layers", default=-1, min=-1, max=200, step=1, tooltip="-1 = offload all layers to GPU"),
+                io.Int.Input("n_ctx", default=8192, min=512, max=131072, step=512, tooltip="Context window size (Gemma-4 supports up to 128 K)"),
+                io.Float.Input("video_fps", default=1.0, min=0.1, max=5.0, step=0.1, tooltip="Temporal sampling rate for video input (frames per second)"),
+                # --- Optional media inputs ---
+                io.Image.Input("image", optional=True),
+                io.Image.Input("reference_image", optional=True, tooltip="Reference image for style transfer"),
+                io.Image.Input("video", optional=True, tooltip="Video frames as image batch [F, H, W, 3]"),
+                io.Audio.Input("audio", optional=True),
+            ],
+            outputs=[
+                io.String.Output("analysis_text", display_name="Analysis Text"),
+            ],
+        )
+
+    @classmethod
+    def execute(
+        cls,
         gguf_model: str,
         mmproj_model: str,
         use_custom_prompt: bool,
@@ -408,9 +311,10 @@ class GemmaGGUFAnalyzer:
         reference_image: Optional[torch.Tensor] = None,
         video: Optional[torch.Tensor] = None,
         audio: Optional[dict] = None,
-    ) -> tuple[str]:
+        **kwargs,
+    ) -> io.NodeOutput:
         try:
-            return self._run_inference(
+            result = _run_inference(
                 gguf_model=gguf_model,
                 mmproj_model=mmproj_model,
                 use_custom_prompt=use_custom_prompt,
@@ -439,162 +343,155 @@ class GemmaGGUFAnalyzer:
                 video=video,
                 audio=audio,
             )
+            return io.NodeOutput(result)
         except FileNotFoundError as e:
-            error_msg = f"[GemmaGGUFAnalyzer] File not found: {e}"
+            error_msg = f"[DuffyGemmaGGUFAnalyzer] File not found: {e}"
             logger.error(error_msg)
-            return (error_msg,)
+            return io.NodeOutput(error_msg)
         except ValueError as e:
-            error_msg = f"[GemmaGGUFAnalyzer] Validation error: {e}"
+            error_msg = f"[DuffyGemmaGGUFAnalyzer] Validation error: {e}"
             logger.error(error_msg)
-            return (error_msg,)
+            return io.NodeOutput(error_msg)
         except Exception as e:
-            error_msg = f"[GemmaGGUFAnalyzer] Inference failed: {e}"
+            error_msg = f"[DuffyGemmaGGUFAnalyzer] Inference failed: {e}"
             logger.error(error_msg, exc_info=True)
-            return (error_msg,)
+            return io.NodeOutput(error_msg)
         finally:
             if unload_model:
                 logger.info("Unloading model (unload_model=True)")
-                unload_llm(self.model_instance)
-                self.model_instance = None
-                self.current_model_path = None
-                self.current_mmproj_path = None
-                self.current_n_gpu_layers = None
-                self.current_n_ctx = None
-                self.current_enable_thinking = None
+                _model_cache.unload()
 
-    def _run_inference(
-        self,
-        gguf_model: str,
-        mmproj_model: str,
-        use_custom_prompt: bool,
-        preset_prompt: str,
-        system_prompt: str,
-        user_prompt: str,
-        enable_thinking: bool,
-        strip_thinking_tags: bool,
-        max_tokens: int,
-        temperature: float,
-        top_k: int,
-        top_p: float,
-        min_p: float,
-        repeat_penalty: float,
-        presence_penalty: float,
-        frequency_penalty: float,
-        mirostat_mode: int,
-        mirostat_tau: float,
-        mirostat_eta: float,
-        seed: int,
-        n_gpu_layers: int,
-        n_ctx: int,
-        video_fps: float,
-        image: Optional[torch.Tensor] = None,
-        reference_image: Optional[torch.Tensor] = None,
-        video: Optional[torch.Tensor] = None,
-        audio: Optional[dict] = None,
-    ) -> tuple[str]:
-        # ----- Resolve file paths ----- #
-        model_path = folder_paths.get_full_path("LLM", gguf_model)
-        mmproj_path = folder_paths.get_full_path("LLM", mmproj_model)
 
-        if not model_path or not os.path.isfile(model_path):
-            raise FileNotFoundError(
-                f"GGUF model not found: '{gguf_model}'. "
-                "Ensure it is placed in ComfyUI/models/LLM/"
-            )
-        if not mmproj_path or not os.path.isfile(mmproj_path):
-            raise FileNotFoundError(
-                f"Multimodal projector not found: '{mmproj_model}'. "
-                "Both the model .gguf and its mmproj-*.gguf must reside "
-                "together in ComfyUI/models/LLM/"
-            )
+# ---------------------------------------------------------------------------
+# Inference logic (module-level, stateless)
+# ---------------------------------------------------------------------------
 
-        # ----- Resolve effective system prompt ----- #
-        if use_custom_prompt:
-            effective_system_prompt = system_prompt
-            logger.info("Using custom system prompt")
-        else:
-            effective_system_prompt = PRESET_PROMPTS.get(preset_prompt, system_prompt)
-            logger.info("Using preset system prompt: %s", preset_prompt)
-            if preset_prompt == "Style Transfer Prompt" and reference_image is None:
-                logger.warning(
-                    "Style Transfer Prompt selected but no reference_image connected. "
-                    "The style transfer prompt expects both an input image and a reference image."
-                )
+def _run_inference(
+    gguf_model: str,
+    mmproj_model: str,
+    use_custom_prompt: bool,
+    preset_prompt: str,
+    system_prompt: str,
+    user_prompt: str,
+    enable_thinking: bool,
+    strip_thinking_tags: bool,
+    max_tokens: int,
+    temperature: float,
+    top_k: int,
+    top_p: float,
+    min_p: float,
+    repeat_penalty: float,
+    presence_penalty: float,
+    frequency_penalty: float,
+    mirostat_mode: int,
+    mirostat_tau: float,
+    mirostat_eta: float,
+    seed: int,
+    n_gpu_layers: int,
+    n_ctx: int,
+    video_fps: float,
+    image: Optional[torch.Tensor] = None,
+    reference_image: Optional[torch.Tensor] = None,
+    video: Optional[torch.Tensor] = None,
+    audio: Optional[dict] = None,
+) -> str:
+    # ----- Resolve file paths ----- #
+    model_path = folder_paths.get_full_path("LLM", gguf_model)
+    mmproj_path = folder_paths.get_full_path("LLM", mmproj_model)
 
-        # ----- Load / cache model ----- #
-        if self._needs_reload(model_path, mmproj_path, n_gpu_layers, n_ctx, enable_thinking):
-            self._load_model(model_path, mmproj_path, n_gpu_layers, n_ctx, enable_thinking)
-
-        # ----- Build user content array ----- #
-        user_content: list[dict[str, Any]] = [
-            {"type": "text", "text": user_prompt},
-        ]
-
-        if image is not None:
-            if reference_image is not None:
-                # Label images so the model can distinguish them
-                user_content.append({"type": "text", "text": "Input Image:"})
-            user_content.append(image_tensor_to_data_uri(image))
-
-        if reference_image is not None:
-            user_content.append({"type": "text", "text": "Reference Image:"})
-            user_content.append(image_tensor_to_data_uri(reference_image))
-
-        if video is not None:
-            user_content.extend(
-                video_tensor_to_frame_list(
-                    video, target_fps=video_fps, n_ctx=n_ctx,
-                )
-            )
-
-        if audio is not None:
-            user_content.append(audio_to_data_uri(audio))
-
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": effective_system_prompt},
-            {"role": "user", "content": user_content},
-        ]
-
-        # ----- Thinking mode adjustments ----- #
-        # enable_thinking is already handled by Gemma4ChatHandler at construction time.
-        # Here we only apply the recommended parameter adjustments.
-        if not enable_thinking:
-            if temperature == 0.8:
-                temperature = 0.7
-                logger.info("Thinking disabled: temperature auto-adjusted to 0.7")
-            if presence_penalty == 0.0:
-                presence_penalty = 1.5
-                logger.info("Thinking disabled: presence_penalty auto-adjusted to 1.5")
-
-        # ----- Run inference ----- #
-        # Note: llama-cpp-python 0.3.35 renamed presence_penalty → present_penalty
-        completion = self.model_instance.create_chat_completion(
-            messages=messages,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            top_k=top_k,
-            top_p=top_p,
-            min_p=min_p,
-            repeat_penalty=repeat_penalty,
-            present_penalty=presence_penalty,
-            frequency_penalty=frequency_penalty,
-            mirostat_mode=mirostat_mode,
-            mirostat_tau=mirostat_tau,
-            mirostat_eta=mirostat_eta,
-            seed=seed if seed >= 0 else None,
+    if not model_path or not os.path.isfile(model_path):
+        raise FileNotFoundError(
+            f"GGUF model not found: '{gguf_model}'. "
+            "Ensure it is placed in ComfyUI/models/LLM/"
+        )
+    if not mmproj_path or not os.path.isfile(mmproj_path):
+        raise FileNotFoundError(
+            f"Multimodal projector not found: '{mmproj_model}'. "
+            "Both the model .gguf and its mmproj-*.gguf must reside "
+            "together in ComfyUI/models/LLM/"
         )
 
-        response_text: str = completion["choices"][0]["message"]["content"] or ""
+    # ----- Resolve effective system prompt ----- #
+    if use_custom_prompt:
+        effective_system_prompt = system_prompt
+        logger.info("Using custom system prompt")
+    else:
+        effective_system_prompt = PRESET_PROMPTS.get(preset_prompt, system_prompt)
+        logger.info("Using preset system prompt: %s", preset_prompt)
+        if preset_prompt == "Style Transfer Prompt" and reference_image is None:
+            logger.warning(
+                "Style Transfer Prompt selected but no reference_image connected. "
+                "The style transfer prompt expects both an input image and a reference image."
+            )
 
-        # ----- Strip thinking tags if requested ----- #
-        if strip_thinking_tags:
-            # Gemma 4 uses <|channel>thought\n...<channel|> for thinking blocks
-            response_text = re.sub(
-                r"<\|channel>thought\n.*?<channel\|>", "", response_text, flags=re.DOTALL
-            ).strip()
-            # Also strip legacy <think>...</think> tags for compatibility
-            response_text = re.sub(
-                r"<think>.*?</think>", "", response_text, flags=re.DOTALL
-            ).strip()
+    # ----- Load / cache model ----- #
+    if _model_cache.needs_reload(model_path, mmproj_path, n_gpu_layers, n_ctx, enable_thinking):
+        _model_cache.load_model(model_path, mmproj_path, n_gpu_layers, n_ctx, enable_thinking)
 
-        return (response_text,)
+    # ----- Build user content array ----- #
+    user_content: list[dict[str, Any]] = [
+        {"type": "text", "text": user_prompt},
+    ]
+
+    if image is not None:
+        if reference_image is not None:
+            user_content.append({"type": "text", "text": "Input Image:"})
+        user_content.append(image_tensor_to_data_uri(image))
+
+    if reference_image is not None:
+        user_content.append({"type": "text", "text": "Reference Image:"})
+        user_content.append(image_tensor_to_data_uri(reference_image))
+
+    if video is not None:
+        user_content.extend(
+            video_tensor_to_frame_list(
+                video, target_fps=video_fps, n_ctx=n_ctx,
+            )
+        )
+
+    if audio is not None:
+        user_content.append(audio_to_data_uri(audio))
+
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": effective_system_prompt},
+        {"role": "user", "content": user_content},
+    ]
+
+    # ----- Thinking mode adjustments ----- #
+    if not enable_thinking:
+        if temperature == 0.8:
+            temperature = 0.7
+            logger.info("Thinking disabled: temperature auto-adjusted to 0.7")
+        if presence_penalty == 0.0:
+            presence_penalty = 1.5
+            logger.info("Thinking disabled: presence_penalty auto-adjusted to 1.5")
+
+    # ----- Run inference ----- #
+    completion = _model_cache.model_instance.create_chat_completion(
+        messages=messages,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        top_k=top_k,
+        top_p=top_p,
+        min_p=min_p,
+        repeat_penalty=repeat_penalty,
+        present_penalty=presence_penalty,
+        frequency_penalty=frequency_penalty,
+        mirostat_mode=mirostat_mode,
+        mirostat_tau=mirostat_tau,
+        mirostat_eta=mirostat_eta,
+        seed=seed if seed >= 0 else None,
+    )
+
+    response_text: str = completion["choices"][0]["message"]["content"] or ""
+
+    # ----- Strip thinking tags if requested ----- #
+    if strip_thinking_tags:
+        response_text = re.sub(
+            r"<\|channel>thought\n.*?<channel\|>", "", response_text, flags=re.DOTALL
+        ).strip()
+        response_text = re.sub(
+            r"<think>.*?</think>", "", response_text, flags=re.DOTALL
+        ).strip()
+
+    return response_text
